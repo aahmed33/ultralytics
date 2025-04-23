@@ -1,0 +1,63 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# Ultralytics YOLO11 object detection model with P3/8 - P5/32 outputs
+# Model docs: https://docs.ultralytics.com/models/yolo11
+# Task docs: https://docs.ultralytics.com/tasks/detect
+
+# Parameters
+nc: 80 # number of classes
+scales: # model compound scaling constants, i.e. 'model=yolo11n.yaml' will call yolo11.yaml with scale 'n'
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024] # summary: 181 layers, 2624080 parameters, 2624064 gradients, 6.6 GFLOPs
+  s: [0.50, 0.50, 1024] # summary: 181 layers, 9458752 parameters, 9458736 gradients, 21.7 GFLOPs
+  m: [0.50, 1.00, 512] # summary: 231 layers, 20114688 parameters, 20114672 gradients, 68.5 GFLOPs
+  l: [1.00, 1.00, 512] # summary: 357 layers, 25372160 parameters, 25372144 gradients, 87.6 GFLOPs
+  x: [1.00, 1.50, 512] # summary: 357 layers, 56966176 parameters, 56966160 gradients, 196.0 GFLOPs
+
+# YOLO11n backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]]                               # 0 - P1/2 (unchanged)
+  - [0, 1, Conv, [128, 3, 2]]                               # 1 - P2/4 (unchanged)
+  - [1, 2, C3k2, [256, False, 0.25]]                        # 2 - (unchanged)
+  - [2, 1, Conv, [256, 3, 2]]                               # 3 - P3/8 (unchanged)
+  
+  # Additions
+
+  # MobileViT and PSA were added at P3 level to better model hand detail earlier rather than later
+  - [3, 1, Conv, [512, 1, 1]]                               # 4 - Bottleneck projection before PSA
+  - [4, 1, C2fPSA, [512]]                                   # 5 - Spatial attention (replaces original C3k2)
+  - [5, 1, MobileViTBlock, [128, 192, 1, 2, 4]]             # 6 - Transformer-style global context
+
+  # Added C3TR at P4 to improve semantic representation
+  - [6, 1, Conv, [512, 3, 2]]                               # 7 - P4/16 
+  - [7, 1, C3TR, [512, 512, 1]]                             # 8 - Transformer-enhanced residual block (replaced C3k2)
+  
+  - [8, 1, Conv, [1024, 3, 2]]                              # 9 - P5/32 (unchanged location relative to original)
+  - [9, 1, C2PSA, [1024]]                                   # 10 - PSA block replaces original C3k2
+  - [10, 1, SPPF, [1024, 5]]                                # 11 - (unchanged)
+  - [11, 1, Conv, [1024, 1, 1]]                             # 12 - Added projection layer before head & auxiliary
+
+# YOLO11n head
+head:
+  - [12, 1, nn.Upsample, [None, 2, "nearest"]]              # 13 - (unchanged location)
+  - [[13, 8], 1, Concat, [1]]                               # 14 - Concat with P4 (C3TR output instead of C3k2) (unchanged location)
+  - [14, 2, C3k2, [512, False]]                             # 15 - (unchanged location)
+  
+  - [15, 1, nn.Upsample, [None, 2, "nearest"]]              # 16 - (unchanged location)
+  - [[16, 5], 1, Concat, [1]]                               # 17 - Concat with P3 (PSA output instead of C3k2) (unchanged location)
+  - [17, 2, C3k2, [256, False]]                             # 18 - (P3/8-small) (unchanged location)
+
+  - [18, 1, Conv, [256, 3, 2]]                              # 19 - (unchanged location)
+  - [[19, 14], 1, Concat, [1]]                              # 20 - cat head p4 (unchanged location)
+  - [20, 2, C3k2, [512, False]]                             # 21 - (P4/16-medium)
+
+  - [21, 1, Conv, [512, 3, 2]]                              # 22 - (unchanged location)
+  - [[22, 11], 1, Concat, [1]]                              # 23 - Concat with SPPF output (unchanged location)
+  - [23, 2, C3k2, [1024, True]]                             # 24 - (P5/32-large) (unchanged location)
+
+  - [[18, 21, 24], 1, Detect, [nc]]                         # 25 - Detect(P3, P4, P5) (unchanged location)
+
+  # Added Auxiliary Classification Head
+  - [12, 1, nn.AdaptiveAvgPool2d, [1]]                      # 26 - Global pooling on feature map from index 12 (post-SPPF)
+  - [26, 1, Conv, [nc, 1, 1, 0]]                            # 27 - Auxiliary logits output for class-level supervision

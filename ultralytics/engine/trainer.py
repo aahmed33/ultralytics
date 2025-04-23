@@ -325,6 +325,20 @@ class BaseTrainer:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
 
+        # Run one validation sample before training starts to debug loss
+        print("\n[DEBUG] Running early validation check")
+        sample_batch = next(iter(self.validator.dataloader))
+
+        # Convert image to float and normalize
+        sample_batch["img"] = sample_batch["img"].to(self.device).float() / 255.0
+
+        sample_preds = self.model(sample_batch["img"])
+        try:
+            loss, loss_items = self.model.loss(sample_batch, sample_preds)
+            print(f"[DEBUG] Pre-train loss: {loss_items}")
+        except Exception as e:
+            print(f"[ERROR] Early validation failed: {e}")
+
         nb = len(self.train_loader)  # number of batches
         nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
         last_opt_step = -1
@@ -435,6 +449,13 @@ class BaseTrainer:
                 # Validation
                 if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
                     self.metrics, self.fitness = self.validate()
+
+                # Added for debugging
+                if epoch == 0 and self.loss_items is not None:
+                    print(f"[DEBUG] Epoch 1 losses: box={self.loss_items[0]:.4f}, cls={self.loss_items[1]:.4f}, dfl={self.loss_items[2]:.4f}")
+                    if len(self.loss_items) > 3:
+                        print(f"[DEBUG] Aux loss (optional): {self.loss_items[3]:.4f}")
+
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
                 if self.args.time:

@@ -4,6 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import sys
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
@@ -50,6 +51,7 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "MobileViTBlock",
 )
 
 
@@ -1293,6 +1295,7 @@ class Attention(nn.Module):
             attn_ratio (float): Attention ratio for key dimension.
         """
         super().__init__()
+        # print(f"[DEBUG] Attention init: dim={dim}, num_heads={num_heads}, attn_ratio={attn_ratio}")
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.key_dim = int(self.head_dim * attn_ratio)
@@ -1314,6 +1317,7 @@ class Attention(nn.Module):
             (torch.Tensor): The output tensor after self-attention.
         """
         B, C, H, W = x.shape
+        #print(f"[DEBUG] Attention forward: input shape = {x.shape}, dim={C}, heads={self.num_heads}")
         N = H * W
         qkv = self.qkv(x)
         q, k, v = qkv.view(B, self.num_heads, self.key_dim * 2 + self.head_dim, N).split(
@@ -1360,7 +1364,8 @@ class PSABlock(nn.Module):
             shortcut (bool): Whether to use shortcut connections.
         """
         super().__init__()
-
+        # Debug commented out due to Auxiliary head being removed
+        # print(f"[DEBUG] PSABlock: initialized with c={c}, attn_ratio={attn_ratio}, num_heads={num_heads}")
         self.attn = Attention(c, attn_ratio=attn_ratio, num_heads=num_heads)
         self.ffn = nn.Sequential(Conv(c, c * 2, 1), Conv(c * 2, c, 1, act=False))
         self.add = shortcut
@@ -1438,6 +1443,70 @@ class PSA(nn.Module):
         return self.cv2(torch.cat((a, b), 1))
 
 
+# Commented out due to Auxiliary Head being removed
+# class PSA(nn.Module):
+#     """
+#     PSA class for implementing Position-Sensitive Attention in neural networks.
+
+#     This class encapsulates the functionality for applying position-sensitive attention and feed-forward networks to
+#     input tensors, enhancing feature extraction and processing capabilities.
+
+#     Attributes:
+#         c (int): Number of hidden channels after applying the initial convolution.
+#         cv1 (Conv): 1x1 convolution layer to reduce the number of input channels to 2*c.
+#         cv2 (Conv): 1x1 convolution layer to reduce the number of output channels to c.
+#         attn (Attention): Attention module for position-sensitive attention.
+#         ffn (nn.Sequential): Feed-forward network for further processing.
+
+#     Methods:
+#         forward: Applies position-sensitive attention and feed-forward network to the input tensor.
+
+#     Examples:
+#         Create a PSA module and apply it to an input tensor
+#         >>> psa = PSA(c1=128, c2=128, e=0.5)
+#         >>> input_tensor = torch.randn(1, 128, 64, 64)
+#         >>> output_tensor = psa.forward(input_tensor)
+#     """
+
+#     def __init__(self, c1, c2, e=0.5):
+#         """
+#         Initialize PSA module.
+
+#         Args:
+#             c1 (int): Input channels.
+#             c2 (int): Output channels.
+#             e (float): Expansion ratio.
+#         """
+#         super().__init__()
+
+#         # Debugging
+#         print(f"[DEBUG] PSA INIT: c1={c1}, c2={c2}", flush=True)
+#         sys.stdout.flush()
+#         assert c1 == c2, f"\n[DEBUG] Channel mismatch in {self.__class__.__name__}: c1={c1}, c2={c2}"
+       
+#         self.c = int(c1 * e)
+#         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+#         self.cv2 = Conv(2 * self.c, c1, 1)
+
+#         self.attn = Attention(self.c, attn_ratio=0.5, num_heads=self.c // 64)
+#         self.ffn = nn.Sequential(Conv(self.c, self.c * 2, 1), Conv(self.c * 2, self.c, 1, act=False))
+
+#     def forward(self, x):
+#         """
+#         Execute forward pass in PSA module.
+
+#         Args:
+#             x (torch.Tensor): Input tensor.
+
+#         Returns:
+#             (torch.Tensor): Output tensor after attention and feed-forward processing.
+#         """
+#         a, b = self.cv1(x).split((self.c, self.c), dim=1)
+#         b = b + self.attn(b)
+#         b = b + self.ffn(b)
+#         return self.cv2(torch.cat((a, b), 1))
+
+
 class C2PSA(nn.Module):
     """
     C2PSA module with attention mechanism for enhanced feature extraction and processing.
@@ -1496,6 +1565,68 @@ class C2PSA(nn.Module):
         return self.cv2(torch.cat((a, b), 1))
 
 
+# Commented out due to Auxiliary Head being removed
+# class C2PSA(nn.Module):
+#     """
+#     C2PSA module with attention mechanism for enhanced feature extraction and processing.
+
+#     This module implements a convolutional block with attention mechanisms to enhance feature extraction and processing
+#     capabilities. It includes a series of PSABlock modules for self-attention and feed-forward operations.
+
+#     Attributes:
+#         c (int): Number of hidden channels.
+#         cv1 (Conv): 1x1 convolution layer to reduce the number of input channels to 2*c.
+#         cv2 (Conv): 1x1 convolution layer to reduce the number of output channels to c.
+#         m (nn.Sequential): Sequential container of PSABlock modules for attention and feed-forward operations.
+
+#     Methods:
+#         forward: Performs a forward pass through the C2PSA module, applying attention and feed-forward operations.
+
+#     Notes:
+#         This module essentially is the same as PSA module, but refactored to allow stacking more PSABlock modules.
+
+#     Examples:
+#         >>> c2psa = C2PSA(c1=256, c2=256, n=3, e=0.5)
+#         >>> input_tensor = torch.randn(1, 256, 64, 64)
+#         >>> output_tensor = c2psa(input_tensor)
+#     """
+#     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+#         """
+#         Initialize C2PSA module.
+
+#         Args:
+#             c1 (int): Input channels.
+#             c2 (int): Output channels (must match c1).
+#             n (int): Number of PSABlock modules.
+#             e (float): Expansion ratio for internal channel size.
+#             shortcut (bool): compatibility.
+#             g (int): Groups for convolution.
+#         """
+#         # Debugging
+#         assert c1 == c2, f"\n[DEBUG] Channel mismatch in {self.__class__.__name__}: c1={c1}, c2={c2}"
+
+#         super().__init__()
+#         self.c = int(c1 * e)
+#         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+#         self.cv2 = Conv(2 * self.c, c1, 1)
+
+#         self.m = nn.Sequential(*(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64) for _ in range(n)))
+
+#     def forward(self, x):
+#         """
+#         Process the input tensor through a series of PSA blocks.
+
+#         Args:
+#             x (torch.Tensor): Input tensor.
+
+#         Returns:
+#             (torch.Tensor): Output tensor after processing.
+#         """
+#         a, b = self.cv1(x).split((self.c, self.c), dim=1)
+#         b = self.m(b)
+#         return self.cv2(torch.cat((a, b), 1))
+
+
 class C2fPSA(C2f):
     """
     C2fPSA module with enhanced feature extraction using PSA blocks.
@@ -1531,9 +1662,55 @@ class C2fPSA(C2f):
             n (int): Number of PSABlock modules.
             e (float): Expansion ratio.
         """
-        assert c1 == c2
+        # assert c1 == c2
         super().__init__(c1, c2, n=n, e=e)
         self.m = nn.ModuleList(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64) for _ in range(n))
+
+# Commented out due to auxiliary head being commented out
+# class C2fPSA(C2f):
+#     """
+#     C2fPSA module with enhanced feature extraction using PSA blocks.
+
+#     This class extends the C2f module by incorporating PSA blocks for improved attention mechanisms and feature extraction.
+
+#     Attributes:
+#         c (int): Number of hidden channels.
+#         cv1 (Conv): 1x1 convolution layer to reduce the number of input channels to 2*c.
+#         cv2 (Conv): 1x1 convolution layer to reduce the number of output channels to c.
+#         m (nn.ModuleList): List of PSA blocks for feature extraction.
+
+#     Methods:
+#         forward: Performs a forward pass through the C2fPSA module.
+#         forward_split: Performs a forward pass using split() instead of chunk().
+
+#     Examples:
+#         >>> import torch
+#         >>> from ultralytics.models.common import C2fPSA
+#         >>> model = C2fPSA(c1=64, c2=64, n=3, e=0.5)
+#         >>> x = torch.randn(1, 64, 128, 128)
+#         >>> output = model(x)
+#         >>> print(output.shape)
+#     """
+
+#     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+#         """
+#         Initialize C2fPSA module.
+
+#         Args:
+#             c1 (int): Input channels.
+#             c2 (int): Output channels.
+#             n (int): Number of PSABlock modules.
+#             shortcut (bool): For consistency with other C2f modules.
+#             g (int): Number of groups in grouped convolutions. Passed to base class.
+#             e (float): Expansion ratio.
+#         """
+#         # Added debugging
+#         assert c1 == c2, f"\n[DEBUG] Channel mismatch in {self.__class__.__name__}: c1={c1}, c2={c2}"
+
+#         # Shortcut and g are added for YAML/architecture compatibility but are not used in this PSA extension
+#         # Found that during the debugging, adding shortcut and g to the C2fPSA and C2PSA classes resolved bugs during training
+#         super().__init__(c1, c2, n=n, shortcut=shortcut, g=g, e=e)
+#         self.m = nn.ModuleList(PSABlock(self.c, attn_ratio=0.5, num_heads=self.c // 64) for _ in range(n))
 
 
 class SCDown(nn.Module):
@@ -1647,6 +1824,44 @@ class TorchVision(nn.Module):
             y.extend(m(y[-1]) for m in self.m)
         else:
             y = self.m(x)
+        return y
+    
+class MobileViTBlock(nn.Module):
+    # Lightweight ViT block to test for our smaller, less diverse, dataset.
+
+    def __init__(self, c, transformer_dim=192, depth=2, patch_size=2, heads=4):
+        super().__init__()
+        self.patch_size = patch_size
+        self.transformer_dim = transformer_dim
+        self.conv1 = Conv(c, c, k=3)
+        self.conv2 = Conv(c, transformer_dim, k=1)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=heads,
+            dim_feedforward=transformer_dim * 2,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+
+        self.conv3 = Conv(transformer_dim, c, k=1)
+        self.conv4 = Conv(2 * c, c, k=3)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        ph, pw = self.patch_size, self.patch_size
+        assert h % ph == 0 and w % pw == 0, f"Input {h}x{w} not divisible by patch size {ph}x{pw}"
+
+        y = self.conv1(x)                                # [B, C, H, W]
+        y = self.conv2(y)                                # [B, transformer_dim, H, W]
+        y = y.view(b, self.transformer_dim, h * w).permute(0, 2, 1).contiguous()  # [B, N, transformer_dim]
+        
+        y = self.transformer(y)                          # [B, N, transformer_dim]
+        y = y.permute(0, 2, 1).contiguous().view(b, self.transformer_dim, h, w)  # [B, transformer_dim, H, W]
+
+        y = self.conv3(y)                                # [B, C, H, W]
+        y = self.conv4(torch.cat((x, y), dim=1))         # [B, C, H, W]
         return y
 
 

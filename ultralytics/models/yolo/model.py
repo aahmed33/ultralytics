@@ -20,6 +20,8 @@ from ultralytics.utils import ROOT, yaml_load
 
 class YOLO(Model):
     """YOLO (You Only Look Once) object detection model."""
+    # Addition to ensure global install of ultralytics was not being used, but instead, the local version located on my desktop was
+    print("[INFO] YOLO loaded from DESKTOP ultralytics") 
 
     def __init__(self, model="yolo11n.pt", task=None, verbose=False):
         """

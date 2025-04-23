@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from ultralytics.nn.autobackend import check_class_names
+from ultralytics.nn.modules import MobileViTBlock
 from ultralytics.nn.modules import (
     AIFI,
     C1,
@@ -68,6 +69,7 @@ from ultralytics.nn.modules import (
     YOLOEDetect,
     YOLOESegment,
     v10Detect,
+    MobileViTBlock,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -338,6 +340,12 @@ class DetectionModel(BaseModel):
         self.end2end = getattr(self.model[-1], "end2end", False)
 
         # Build strides
+
+        # Commented out for use of Auxiliary head being removed
+        # m = next((l for l in reversed(self.model.layers)
+        #         if isinstance(getattr(l, "module", l), Detect)), None)
+        # if m is None:
+        #     raise ValueError("No Detect layer found in model.")
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, YOLOEDetect, YOLOESegment
             s = 256  # 2x min stride
@@ -386,6 +394,15 @@ class DetectionModel(BaseModel):
         y = self._clip_augmented(y)  # clip augmented tails
         return torch.cat(y, -1), None  # augmented inference, train
 
+    # Commented out due to auxiliary head being commented out    
+    # def forward(self, x, augment=False, visualize=False, embed=False):
+    #     """
+    #     Standard forward pass. Returns full model output.
+    #     """
+    #     if isinstance(x, dict):
+    #         x = x["img"]
+    #     return self.model(x)
+
     @staticmethod
     def _descale_pred(p, flips, scale, img_size, dim=1):
         """
@@ -431,6 +448,18 @@ class DetectionModel(BaseModel):
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
         return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+    
+    def __call__(self, batch, **kwargs):
+        """Override call to return (loss, loss_items) tuple during training."""
+        if not hasattr(self, "criterion"):
+            self.criterion = self.init_criterion()  # initialize only once, when args are ready
+
+        if isinstance(batch, dict) and "img" in batch:
+            preds = self.forward(batch["img"], **kwargs)
+            return self.criterion(preds, batch)
+        else:
+            # Inference mode
+            return self.forward(batch, **kwargs)
 
 
 class OBBModel(DetectionModel):
@@ -1136,6 +1165,74 @@ class SafeClass:
         pass
 
 
+class SaveOutputs(nn.Module):
+    def __init__(self, layers):
+        super().__init__()
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x):
+        outputs = []
+        for i, layer in enumerate(self.layers):
+            f = getattr(layer, 'f', -1)
+            if isinstance(f, int):
+                xi = outputs[f] if f != -1 else x
+            elif isinstance(f, list):
+                xi = [outputs[j] if j != -1 else x for j in f]
+            else:
+                raise TypeError(f"Invalid type for 'from': {type(f)}")
+            out = layer(xi)
+            outputs.append(out)
+
+        # Output Handling
+        if self.training:
+            # AUXILIARY HEAD RETURN (Commented out due to long training times)
+            # if len(outputs) > 27:
+            #     return outputs[25], outputs[27].squeeze(-1).squeeze(-1)  # original aux head path
+            # elif len(outputs) > 25:
+            #     return outputs[25], torch.zeros((outputs[25].shape[0], 1), device=outputs[25][0].device)
+            # else:
+            #     raise IndexError(f"[ERROR] Not enough outputs: only {len(outputs)} layers were run.")
+
+            # CURRENT
+            return outputs[25], None  # No aux head
+        else:
+            return outputs[25] if len(outputs) > 25 else outputs[-1]
+
+    def __getitem__(self, idx):
+        return self.layers[idx]
+    
+# Used to debug issues with wrapping of layers after changes to architecture
+class WrappedModule(nn.Module):
+    def __init__(self, module, idx):
+        super().__init__()
+        self.module = module
+        self.idx = idx
+        self.i = idx
+        self.f = getattr(module, 'f', -1)
+
+    def forward(self, x):
+        # print(f"[WRAP DEBUG] Layer {idx} uses 'from' = {self.f}")
+        # if isinstance(x, torch.Tensor):
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) received Tensor shape {x.shape}")
+        # elif isinstance(x, (list, tuple)):
+        #     shapes = [t.shape for t in x if isinstance(t, torch.Tensor)]
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) received list of shapes {shapes}")
+        # elif isinstance(x, dict):
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) received dict keys: {list(x.keys())}")
+        # else:
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) received type: {type(x)}")
+        out = self.module(x)
+        # if isinstance(out, torch.Tensor):
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) returned Tensor shape {out.shape}")
+        # elif isinstance(out, (list, tuple)):
+        #     shapes = [t.shape for t in out if isinstance(t, torch.Tensor)]
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) returned list of shapes {shapes}")
+        # elif isinstance(out, dict):
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) returned dict keys: {list(out.keys())}")
+        # else:
+        #     print(f"[WRAP DEBUG] Layer {idx} ({self.module.__class__.__name__}) returned type: {type(out)}")
+        return out
+
 class SafeUnpickler(pickle.Unpickler):
     """Custom Unpickler that replaces unknown classes with SafeClass."""
 
@@ -1419,7 +1516,20 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             A2C2f,
         }
     )
-    for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
+    # Previously used for Concat debugging
+    # def tag_concat_layers(module, index):
+    #     if isinstance(module, Concat):
+    #         module.layer_index = index
+    #     elif isinstance(module, nn.Sequential):
+    #         for submodule in module:
+    #             tag_concat_layers(submodule, index)
+    #     elif isinstance(module, nn.Module):
+    #         for _, sub in module.named_children():
+    #             tag_concat_layers(sub, index)
+    #     elif hasattr(module, "module"):
+    #         tag_concat_layers(module.module, index)
+
+    for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):     # from, number, module, args
         m = (
             getattr(torch.nn, m[3:])
             if "nn." in m
@@ -1492,16 +1602,39 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = ch[f]
 
         m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
+        
+        # Debugging of layers
+        # print(f"[TRACE] Layer {i}: {m.__name__} | from={f} | Output channels={c2}")
+        # if isinstance(m_, Concat):
+        #     m_.layer_index = i
+        # elif isinstance(m_, nn.Sequential):
+        #     for layer in m_:
+        #         if isinstance(layer, Concat):
+        #             layer.layer_index = i
+        
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m_.np = sum(x.numel() for x in m_.parameters())  # number params
         m_.i, m_.f, m_.type = i, f, t  # attach index, 'from' index, type
         if verbose:
             LOGGER.info(f"{i:>3}{str(f):>20}{n_:>3}{m_.np:10.0f}  {t:<45}{str(args):<30}")  # print
         save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
+        
+        # Debugging for save layers
+        # print(f"[SAVE DEBUG] Saving outputs from layers: {save}")
+
+        # Previously wrapped module for debugging AUX head (now removed)
+        # if i != len(d["backbone"] + d["head"]) - 1:
+        #     m_ = WrappedModule(m_, i)
+
+        # tag_concat_layers(m_, i)  # AUX only
+        
         layers.append(m_)
         if i == 0:
             ch = []
         ch.append(c2)
+
+    # Old return for use when Auxiliary Head existed
+    # return SaveOutputs(layers), sorted(save)
     return torch.nn.Sequential(*layers), sorted(save)
 
 

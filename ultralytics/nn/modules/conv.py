@@ -669,6 +669,8 @@ class Concat(nn.Module):
         """
         super().__init__()
         self.d = dimension
+        # Used for debugging during model parsing
+        self.layer_index = None
 
     def forward(self, x):
         """
@@ -680,6 +682,11 @@ class Concat(nn.Module):
         Returns:
             (torch.Tensor): Concatenated tensor.
         """
+        # Type checking for debugging
+        if not isinstance(x, (list, tuple)):
+            print(f"\n[DEBUG] Concat received non-list input at layer {self.layer_index}")
+            print(f"[DEBUG] Type: {type(x)} | Shape: {getattr(x, 'shape', 'unknown')}")
+            raise TypeError(f"[DEBUG] torch.cat expects a list/tuple, got {type(x)} at {self}")
         return torch.cat(x, self.d)
 
 

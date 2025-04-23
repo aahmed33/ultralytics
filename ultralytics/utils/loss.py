@@ -8,6 +8,7 @@ from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
+from ultralytics.nn.modules.head import Detect  # Added for explicit access to the Detect layer inside custom model
 
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
@@ -172,6 +173,38 @@ class v8DetectionLoss:
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
+
+    # Old __init__ for use of auxiliary head that was later commented out
+    # def __init__(self, model, tal_topk=10):  # model must be de-paralleled
+    #     """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
+    #     device = next(model.parameters()).device  # get model device
+    #     h = model.args  # hyperparameters
+
+    #     # Find and unwrap the Detect layer
+        
+    #     # Line 164 used in case SaveOutputs gets used later
+    #     layers = model.model.layers if hasattr(model.model, "layers") else model.model
+    #     m = next((l for l in reversed(layers)
+    #         if isinstance(getattr(l, "module", l), Detect)), None)
+    #     if m is None:
+    #         raise ValueError("No Detect layer found in model.")
+        
+    #     m = getattr(m, "module", m)  # Unwrap before attribute access
+
+    #     self.bce = nn.BCEWithLogitsLoss(reduction="none")
+    #     self.hyp = h
+    #     self.stride = m.stride  # model strides
+    #     self.nc = m.nc  # number of classes
+    #     self.no = m.nc + m.reg_max * 4
+    #     self.reg_max = m.reg_max
+    #     self.device = device
+
+    #     self.use_dfl = m.reg_max > 1
+
+    #     self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+    #     self.bbox_loss = BboxLoss(m.reg_max).to(device)
+    #     self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocess targets by converting to tensor format and scaling coordinates."""
         nl, ne = targets.shape
@@ -201,7 +234,37 @@ class v8DetectionLoss:
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
-        feats = preds[1] if isinstance(preds, tuple) else preds
+
+        # Auxiliary head code, commented out due to performance issues
+        
+        # aux_loss = torch.tensor(0.0, device=self.device)
+
+        # Handle case where aux_out is a list (e.g., in validation or AMP mode)
+        # if isinstance(preds, tuple) and preds[1] is not None:
+        #     feats, aux_out = preds
+
+        #     if isinstance(aux_out, list):  # Handle AMP-mode lists
+        #         aux_out = aux_out[0]
+        
+        #     aux_out = aux_out.view(aux_out.shape[0], -1)
+        
+        #     device = aux_out.device
+        #     B = aux_out.shape[0]
+        
+        #     gt_cls = torch.full((B,), 0, dtype=torch.long, device=device)
+        #     batch_idx = batch['batch_idx'].to(device)
+        #     cls_vals = batch['cls'].long().to(device)
+        
+        #     for i in range(B):
+        #         match = (batch_idx == i).nonzero(as_tuple=True)[0]
+        #         if len(match) > 0:
+        #             gt_cls[i] = cls_vals[match[0]]
+        
+        #     aux_loss = nn.CrossEntropyLoss()(aux_out, gt_cls)
+        # else:
+        #     feats = preds
+
+        feats = preds[1] if isinstance(preds, tuple) else preds  # Use main features
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
         )
@@ -254,6 +317,14 @@ class v8DetectionLoss:
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
+    # Commented out due to Aux head being commented out
+    # def validation_loss(self, preds, aux_loss):
+    #     """
+    #     Lightweight loss computation for validation when only final output is available.
+    #     """
+    #     loss_items = torch.zeros(4, device=self.device)
+    #     loss_items[3] = 0.0  # aux_loss disabled
+    #     return aux_loss, loss_items
 
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses for YOLOv8 segmentation."""
